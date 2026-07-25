@@ -171,7 +171,8 @@ For example, if you **don't** use an ``OpenXRMetaEnvironmentDepth`` node, you ca
 	}
 
 	float get_bilinear_environment_depth(vec2 uv, uint view_index) {
-		vec2 p = uv / META_ENVIRONMENT_DEPTH_TEXEL_SIZE;
+		// Convert UV to texel-center coordinates before selecting the 2x2 footprint.
+		vec2 p = uv / META_ENVIRONMENT_DEPTH_TEXEL_SIZE - vec2(0.5);
 		vec2 f = fract(p);
 		vec2 i = floor(p);
 

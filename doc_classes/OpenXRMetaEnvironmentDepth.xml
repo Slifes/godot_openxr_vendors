@@ -50,7 +50,7 @@
 	</methods>
 	<members>
 		<member name="bilinear_filtering" type="bool" setter="set_bilinear_filtering" getter="get_bilinear_filtering" default="true">
-			Enables bilinear filtering. This will have a higher GPU cost, but lead to somewhat straighter (rather than jagged) edges in the reprojected data.
+			Enables four-sample coverage-aware bilinear filtering. This reduces stair-stepped edges without alpha blending and avoids interpolating invalid texels or unrelated surfaces across a depth discontinuity.
 		</member>
 		<member name="mask_filter_bias" type="float" setter="set_mask_filter_bias" getter="get_mask_filter_bias" default="0.01">
 			Distance, in meters along the depth camera view, that the mask is moved toward the camera before comparison. Increase this value if imperfect room meshes leave small patches of environment depth. Large values can also remove hands or other real geometry close to the masked surface.

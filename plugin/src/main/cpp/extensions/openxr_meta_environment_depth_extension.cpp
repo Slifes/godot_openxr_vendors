@@ -121,6 +121,94 @@ void vertex() {
 #endif
 	POSITION = clip;
 }
+#ifdef USE_PREPROJECTED_DEPTH
+#ifdef USE_BILINEAR_FILTERING
+float get_reprojected_depth_bilinear(vec2 uv, uint view_index) {
+	vec2 texture_size = vec2(textureSize(reprojected_depth_texture, 0).xy);
+	vec2 texel_size = 1.0 / texture_size;
+	vec2 p = uv * texture_size - vec2(0.5);
+	vec2 f = fract(p);
+	vec2 i = floor(p);
+
+	vec2 uv00 = (i + vec2(0.5, 0.5)) * texel_size;
+	vec2 uv10 = uv00 + vec2(texel_size.x, 0.0);
+	vec2 uv01 = uv00 + vec2(0.0, texel_size.y);
+	vec2 uv11 = uv00 + texel_size;
+
+	float d00 = texture(reprojected_depth_texture, vec3(uv00, float(view_index))).r;
+	float d10 = texture(reprojected_depth_texture, vec3(uv10, float(view_index))).r;
+	float d01 = texture(reprojected_depth_texture, vec3(uv01, float(view_index))).r;
+	float d11 = texture(reprojected_depth_texture, vec3(uv11, float(view_index))).r;
+
+	float w00 = (1.0 - f.x) * (1.0 - f.y);
+	float w10 = f.x * (1.0 - f.y);
+	float w01 = (1.0 - f.x) * f.y;
+	float w11 = f.x * f.y;
+
+	float v00 = d00 > 0.0 ? 1.0 : 0.0;
+	float v10 = d10 > 0.0 ? 1.0 : 0.0;
+	float v01 = d01 > 0.0 ? 1.0 : 0.0;
+	float v11 = d11 > 0.0 ? 1.0 : 0.0;
+	float valid_coverage = w00 * v00 + w10 * v10 + w01 * v01 + w11 * v11;
+	if (valid_coverage < 0.5) {
+		return 0.0;
+	}
+
+	float min_depth = 1.0;
+	float max_depth = 0.0;
+	if (v00 > 0.0) {
+		min_depth = min(min_depth, d00);
+		max_depth = max(max_depth, d00);
+	}
+	if (v10 > 0.0) {
+		min_depth = min(min_depth, d10);
+		max_depth = max(max_depth, d10);
+	}
+	if (v01 > 0.0) {
+		min_depth = min(min_depth, d01);
+		max_depth = max(max_depth, d01);
+	}
+	if (v11 > 0.0) {
+		min_depth = min(min_depth, d11);
+		max_depth = max(max_depth, d11);
+	}
+
+	float discontinuity_threshold = max((1.0 - min_depth) * 0.05, 4.0 / 65535.0);
+	if (max_depth - min_depth > discontinuity_threshold) {
+		float split_depth = (min_depth + max_depth) * 0.5;
+		float low_coverage =
+				w00 * v00 * (d00 < split_depth ? 1.0 : 0.0) +
+				w10 * v10 * (d10 < split_depth ? 1.0 : 0.0) +
+				w01 * v01 * (d01 < split_depth ? 1.0 : 0.0) +
+				w11 * v11 * (d11 < split_depth ? 1.0 : 0.0);
+		float high_coverage = valid_coverage - low_coverage;
+		bool use_high_surface = high_coverage >= low_coverage;
+
+		float selected_depth = 0.0;
+		float selected_coverage = 0.0;
+		if (v00 > 0.0 && ((d00 >= split_depth) == use_high_surface)) {
+			selected_depth += d00 * w00;
+			selected_coverage += w00;
+		}
+		if (v10 > 0.0 && ((d10 >= split_depth) == use_high_surface)) {
+			selected_depth += d10 * w10;
+			selected_coverage += w10;
+		}
+		if (v01 > 0.0 && ((d01 >= split_depth) == use_high_surface)) {
+			selected_depth += d01 * w01;
+			selected_coverage += w01;
+		}
+		if (v11 > 0.0 && ((d11 >= split_depth) == use_high_surface)) {
+			selected_depth += d11 * w11;
+			selected_coverage += w11;
+		}
+		return selected_coverage > 0.0 ? selected_depth / selected_coverage : 0.0;
+	}
+
+	return (d00 * w00 * v00 + d10 * w10 * v10 + d01 * w01 * v01 + d11 * w11 * v11) / valid_coverage;
+}
+#endif // USE_BILINEAR_FILTERING
+#endif // USE_PREPROJECTED_DEPTH
 #ifndef USE_PREPROJECTED_DEPTH
 #ifdef USE_BILINEAR_FILTERING
 float get_depth_bilinear(vec2 uv, uint view_index) {
@@ -138,7 +226,77 @@ float get_depth_bilinear(vec2 uv, uint view_index) {
 	float d01 = texture(META_ENVIRONMENT_DEPTH_TEXTURE, vec3(uv01, float(view_index))).r;
 	float d11 = texture(META_ENVIRONMENT_DEPTH_TEXTURE, vec3(uv11, float(view_index))).r;
 
-	return mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
+	float w00 = (1.0 - f.x) * (1.0 - f.y);
+	float w10 = f.x * (1.0 - f.y);
+	float w01 = (1.0 - f.x) * f.y;
+	float w11 = f.x * f.y;
+
+	float v00 = d00 > 0.0 ? 1.0 : 0.0;
+	float v10 = d10 > 0.0 ? 1.0 : 0.0;
+	float v01 = d01 > 0.0 ? 1.0 : 0.0;
+	float v11 = d11 > 0.0 ? 1.0 : 0.0;
+	float valid_coverage = w00 * v00 + w10 * v10 + w01 * v01 + w11 * v11;
+
+	// Do not stretch a single valid depth texel over an otherwise empty
+	// footprint. A half-covered footprint is the hard coverage boundary.
+	if (valid_coverage < 0.5) {
+		return 0.0;
+	}
+
+	float min_depth = 1.0;
+	float max_depth = 0.0;
+	if (v00 > 0.0) {
+		min_depth = min(min_depth, d00);
+		max_depth = max(max_depth, d00);
+	}
+	if (v10 > 0.0) {
+		min_depth = min(min_depth, d10);
+		max_depth = max(max_depth, d10);
+	}
+	if (v01 > 0.0) {
+		min_depth = min(min_depth, d01);
+		max_depth = max(max_depth, d01);
+	}
+	if (v11 > 0.0) {
+		min_depth = min(min_depth, d11);
+		max_depth = max(max_depth, d11);
+	}
+
+	// Keep foreground and background surfaces from being averaged together.
+	// The threshold grows with distance while retaining a D16-sized floor.
+	float discontinuity_threshold = max((1.0 - min_depth) * 0.05, 4.0 / 65535.0);
+	if (max_depth - min_depth > discontinuity_threshold) {
+		float split_depth = (min_depth + max_depth) * 0.5;
+		float low_coverage =
+				w00 * v00 * (d00 < split_depth ? 1.0 : 0.0) +
+				w10 * v10 * (d10 < split_depth ? 1.0 : 0.0) +
+				w01 * v01 * (d01 < split_depth ? 1.0 : 0.0) +
+				w11 * v11 * (d11 < split_depth ? 1.0 : 0.0);
+		float high_coverage = valid_coverage - low_coverage;
+		bool use_high_surface = high_coverage >= low_coverage;
+
+		float selected_depth = 0.0;
+		float selected_coverage = 0.0;
+		if (v00 > 0.0 && ((d00 >= split_depth) == use_high_surface)) {
+			selected_depth += d00 * w00;
+			selected_coverage += w00;
+		}
+		if (v10 > 0.0 && ((d10 >= split_depth) == use_high_surface)) {
+			selected_depth += d10 * w10;
+			selected_coverage += w10;
+		}
+		if (v01 > 0.0 && ((d01 >= split_depth) == use_high_surface)) {
+			selected_depth += d01 * w01;
+			selected_coverage += w01;
+		}
+		if (v11 > 0.0 && ((d11 >= split_depth) == use_high_surface)) {
+			selected_depth += d11 * w11;
+			selected_coverage += w11;
+		}
+		return selected_coverage > 0.0 ? selected_depth / selected_coverage : 0.0;
+	}
+
+	return (d00 * w00 * v00 + d10 * w10 * v10 + d01 * w01 * v01 + d11 * w11 * v11) / valid_coverage;
 }
 #endif // USE_BILINEAR_FILTERING
 #ifdef USE_MASK_FILTER
@@ -156,7 +314,11 @@ void fragment() {
 		discard;
 	}
 #ifdef USE_PREPROJECTED_DEPTH
+#ifdef USE_BILINEAR_FILTERING
+	highp float camera_depth = get_reprojected_depth_bilinear(UV, uint(VIEW_INDEX));
+#else
 	highp float camera_depth = texture(reprojected_depth_texture, vec3(UV, float(VIEW_INDEX))).r;
+#endif
 	if (camera_depth == 0.0) {
 		discard;
 	}
@@ -293,9 +455,86 @@ float get_depth_bilinear(vec2 uv, int view_index) {
 	float d10 = texelFetch(source_depth_texture, ivec3(clamp(i + ivec2(1, 0), ivec2(0), max_pixel), view_index), 0).r;
 	float d01 = texelFetch(source_depth_texture, ivec3(clamp(i + ivec2(0, 1), ivec2(0), max_pixel), view_index), 0).r;
 	float d11 = texelFetch(source_depth_texture, ivec3(clamp(i + ivec2(1, 1), ivec2(0), max_pixel), view_index), 0).r;
-	return mix(mix(d00, d10, f.x), mix(d01, d11, f.x), f.y);
+
+	float w00 = (1.0 - f.x) * (1.0 - f.y);
+	float w10 = f.x * (1.0 - f.y);
+	float w01 = (1.0 - f.x) * f.y;
+	float w11 = f.x * f.y;
+
+	float v00 = d00 > 0.0 ? 1.0 : 0.0;
+	float v10 = d10 > 0.0 ? 1.0 : 0.0;
+	float v01 = d01 > 0.0 ? 1.0 : 0.0;
+	float v11 = d11 > 0.0 ? 1.0 : 0.0;
+	float valid_coverage = w00 * v00 + w10 * v10 + w01 * v01 + w11 * v11;
+	if (valid_coverage < 0.5) {
+		return 0.0;
+	}
+
+	float min_depth = 1.0;
+	float max_depth = 0.0;
+	if (v00 > 0.0) {
+		min_depth = min(min_depth, d00);
+		max_depth = max(max_depth, d00);
+	}
+	if (v10 > 0.0) {
+		min_depth = min(min_depth, d10);
+		max_depth = max(max_depth, d10);
+	}
+	if (v01 > 0.0) {
+		min_depth = min(min_depth, d01);
+		max_depth = max(max_depth, d01);
+	}
+	if (v11 > 0.0) {
+		min_depth = min(min_depth, d11);
+		max_depth = max(max_depth, d11);
+	}
+
+	float discontinuity_threshold = max((1.0 - min_depth) * 0.05, 4.0 / 65535.0);
+	if (max_depth - min_depth > discontinuity_threshold) {
+		float split_depth = (min_depth + max_depth) * 0.5;
+		float low_coverage =
+				w00 * v00 * (d00 < split_depth ? 1.0 : 0.0) +
+				w10 * v10 * (d10 < split_depth ? 1.0 : 0.0) +
+				w01 * v01 * (d01 < split_depth ? 1.0 : 0.0) +
+				w11 * v11 * (d11 < split_depth ? 1.0 : 0.0);
+		float high_coverage = valid_coverage - low_coverage;
+		bool use_high_surface = high_coverage >= low_coverage;
+
+		float selected_depth = 0.0;
+		float selected_coverage = 0.0;
+		if (v00 > 0.0 && ((d00 >= split_depth) == use_high_surface)) {
+			selected_depth += d00 * w00;
+			selected_coverage += w00;
+		}
+		if (v10 > 0.0 && ((d10 >= split_depth) == use_high_surface)) {
+			selected_depth += d10 * w10;
+			selected_coverage += w10;
+		}
+		if (v01 > 0.0 && ((d01 >= split_depth) == use_high_surface)) {
+			selected_depth += d01 * w01;
+			selected_coverage += w01;
+		}
+		if (v11 > 0.0 && ((d11 >= split_depth) == use_high_surface)) {
+			selected_depth += d11 * w11;
+			selected_coverage += w11;
+		}
+		return selected_coverage > 0.0 ? selected_depth / selected_coverage : 0.0;
+	}
+
+	return (d00 * w00 * v00 + d10 * w10 * v10 + d01 * w01 * v01 + d11 * w11 * v11) / valid_coverage;
 }
 #endif
+
+float sample_source_depth(vec2 uv, int view_index) {
+	if (any(lessThan(uv, vec2(0.0))) || any(greaterThan(uv, vec2(1.0)))) {
+		return 0.0;
+	}
+#ifdef USE_BILINEAR_FILTERING
+	return get_depth_bilinear(uv, view_index);
+#else
+	return texture(source_depth_texture, vec3(uv, float(view_index))).r;
+#endif
+}
 
 void main() {
 	ivec3 pixel = ivec3(gl_GlobalInvocationID);
@@ -306,28 +545,42 @@ void main() {
 
 	int view_index = pixel.z;
 	vec2 camera_uv = (vec2(pixel.xy) + vec2(0.5)) / vec2(output_size.xy);
-	vec4 depth_clip = params.camera_to_depth[view_index] * vec4(camera_uv * 2.0 - 1.0, 1.0, 1.0);
+	vec2 camera_ndc_xy = camera_uv * 2.0 - 1.0;
+
+	// Godot's Vulkan camera projection uses reverse-Z, so 0.0 is the far
+	// plane. Start with a rotation-dominant ray lookup instead of projecting
+	// the near plane, which greatly exaggerates translation.
+	vec4 depth_clip = params.camera_to_depth[view_index] * vec4(camera_ndc_xy, 0.0, 1.0);
 	depth_clip /= depth_clip.w;
 	vec2 depth_uv = depth_clip.xy * 0.5 + 0.5;
 
 	float camera_depth = 0.0;
-	if (all(greaterThanEqual(depth_uv, vec2(0.0))) && all(lessThanEqual(depth_uv, vec2(1.0)))) {
-#ifdef USE_BILINEAR_FILTERING
-		float depth = get_depth_bilinear(depth_uv, view_index);
-#else
-		float depth = texture(source_depth_texture, vec3(depth_uv, float(view_index))).r;
-#endif
-		if (depth != 0.0) {
-			vec4 camera_clip = params.depth_to_camera[view_index] * vec4(depth_clip.xy, depth * 2.0 - 1.0, 1.0);
-			if (params.depth_offset.x != 0.0) {
-				float z_adjustment = abs(camera_clip.w) * params.depth_offset.x;
-				if (params.depth_offset.z != 0.0) {
-					z_adjustment = pow(abs(camera_clip.w), params.depth_offset.y) * params.depth_offset.x;
-				}
-				camera_clip.z = clamp(camera_clip.z - z_adjustment, -camera_clip.w, camera_clip.w);
-			}
-			camera_depth = camera_clip.z / camera_clip.w;
+	float depth = sample_source_depth(depth_uv, view_index);
+	if (depth != 0.0) {
+		vec4 camera_clip = params.depth_to_camera[view_index] * vec4(depth_clip.xy, depth * 2.0 - 1.0, 1.0);
+
+		// The first lookup estimates the real camera-space Z. Reproject that
+		// Z along the target eye ray to obtain a depth UV that includes
+		// translation/parallax, then use the refined sample for the output.
+		float estimated_camera_depth = camera_clip.z / camera_clip.w;
+		vec4 refined_depth_clip = params.camera_to_depth[view_index] * vec4(camera_ndc_xy, estimated_camera_depth, 1.0);
+		refined_depth_clip /= refined_depth_clip.w;
+		vec2 refined_depth_uv = refined_depth_clip.xy * 0.5 + 0.5;
+		float refined_depth = sample_source_depth(refined_depth_uv, view_index);
+		if (refined_depth != 0.0) {
+			depth_clip = refined_depth_clip;
+			depth = refined_depth;
+			camera_clip = params.depth_to_camera[view_index] * vec4(depth_clip.xy, depth * 2.0 - 1.0, 1.0);
 		}
+
+		if (params.depth_offset.x != 0.0) {
+			float z_adjustment = abs(camera_clip.w) * params.depth_offset.x;
+			if (params.depth_offset.z != 0.0) {
+				z_adjustment = pow(abs(camera_clip.w), params.depth_offset.y) * params.depth_offset.x;
+			}
+			camera_clip.z = clamp(camera_clip.z - z_adjustment, -camera_clip.w, camera_clip.w);
+		}
+		camera_depth = camera_clip.z / camera_clip.w;
 	}
 
 	imageStore(reprojected_depth_texture, pixel, vec4(camera_depth));
@@ -729,6 +982,9 @@ void OpenXRMetaEnvironmentDepthExtension::update_reprojection_material(bool p_cr
 	PackedStringArray defines;
 
 	const bool use_preprojected_depth = depth_reprojection.reprojected_depth_texture.is_valid();
+	if (reprojection_bilinear_filtering) {
+		defines.append("#define USE_BILINEAR_FILTERING");
+	}
 	if (use_preprojected_depth) {
 		defines.append("#define USE_PREPROJECTED_DEPTH");
 	} else {
@@ -737,9 +993,6 @@ void OpenXRMetaEnvironmentDepthExtension::update_reprojection_material(bool p_cr
 		}
 		if (reprojection_offset_exponent != 1.0) {
 			defines.append("#define USE_DEPTH_OFFSET_EXPONENT");
-		}
-		if (reprojection_bilinear_filtering) {
-			defines.append("#define USE_BILINEAR_FILTERING");
 		}
 		if (reprojection_mask_filter_enabled) {
 			defines.append("#define USE_MASK_FILTER");
