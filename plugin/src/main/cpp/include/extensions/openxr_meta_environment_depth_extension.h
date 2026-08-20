@@ -29,6 +29,8 @@
 
 #pragma once
 
+#include <atomic>
+
 #include <openxr/openxr.h>
 #include <godot_cpp/classes/array_mesh.hpp>
 #include <godot_cpp/classes/open_xr_extension_wrapper.hpp>
@@ -54,6 +56,7 @@ public:
 	virtual void _on_session_destroyed() override;
 
 	virtual void _on_pre_render() override;
+	virtual void _on_pre_draw_viewport(const RID &p_viewport) override;
 
 	virtual uint64_t _set_system_properties_and_get_next_pointer(void *p_next_pointer) override;
 
@@ -85,6 +88,13 @@ public:
 
 	void set_reprojection_bilinear_filtering(bool p_enabled);
 	bool get_reprojection_bilinear_filtering() const;
+
+	void set_reprojection_mask_filter_enabled(bool p_enabled);
+	void set_reprojection_mask_texture(const RID &p_texture);
+	void mark_reprojection_mask_dirty();
+	void set_reprojection_active(bool p_active);
+
+	Vector2i get_environment_depth_texture_size() const;
 
 	void get_environment_depth_map_async(const Callable &p_callback);
 
@@ -170,7 +180,17 @@ private:
 		GraphicsAPI graphics_api = GRAPHICS_API_UNKNOWN;
 		Vector2 depth_swapchain_texel_size;
 		LocalVector<RID> depth_swapchain_textures;
+		LocalVector<RID> depth_swapchain_rd_textures;
 		LocalVector<Callable> depth_map_callbacks;
+		int32_t current_depth_swapchain_index = -1;
+		Projection camera_to_depth[2];
+		Projection depth_to_camera[2];
+		bool depth_reprojection_pending = false;
+		bool globals_depth_available = false;
+		int32_t globals_depth_swapchain_index = -1;
+		Vector2 globals_depth_texel_size;
+		Vector2 globals_depth_z_buffer_params;
+		bool globals_depth_z_buffer_params_valid = false;
 	} render_state;
 
 	bool depth_provider_started = false;
@@ -183,16 +203,59 @@ private:
 	float reprojection_offset_scale = 0.005;
 	float reprojection_offset_exponent = 1.0;
 	bool reprojection_bilinear_filtering = true;
+	bool reprojection_mask_filter_enabled = false;
+	bool reprojection_active = false;
+	RID reprojection_mask_texture;
+	std::atomic_bool reprojection_mask_dirty{ true };
 	bool reprojection_material_dirty = false;
+
+	struct {
+		RID sampler;
+		RID shader;
+		RID pipeline;
+		RID filtered_depth_rd_texture;
+		RID filtered_depth_texture;
+		RID mask_rd_texture;
+		LocalVector<RID> uniform_sets;
+		Vector2i texture_size;
+		uint32_t last_depth_swapchain_index = UINT32_MAX;
+		bool initialization_failed = false;
+	} mask_prefilter;
+
+	struct {
+		RID sampler;
+		RID shader;
+		RID pipeline;
+		RID parameters_buffer;
+		RID reprojected_depth_rd_texture;
+		RID reprojected_depth_texture;
+		LocalVector<RID> raw_depth_uniform_sets;
+		RID filtered_depth_uniform_set;
+		Vector2i texture_size;
+		bool initialization_failed = false;
+	} depth_reprojection;
+
+	std::atomic<int32_t> depth_swapchain_width{ 0 };
+	std::atomic<int32_t> depth_swapchain_height{ 0 };
 
 	GraphicsAPI get_graphics_api();
 
 	void update_reprojection_material(bool p_creation = false);
+	bool _ensure_mask_prefilter_resources_rt();
+	void _free_mask_prefilter_resources_rt();
+	RID _get_mask_prefilter_uniform_set_rt(uint32_t p_swapchain_index);
+	bool _dispatch_mask_prefilter_rt(uint32_t p_swapchain_index);
+	bool _ensure_depth_reprojection_resources_rt();
+	void _free_depth_reprojection_resources_rt();
+	RID _get_depth_reprojection_uniform_set_rt(uint32_t p_swapchain_index, bool p_use_filtered_depth);
+	void _dispatch_depth_reprojection_rt(uint32_t p_swapchain_index, bool p_use_filtered_depth);
+	void _set_depth_globals_unavailable_rt();
 
 	void _start_environment_depth_rt();
 	void _stop_environment_depth_rt();
 	void _set_hand_removal_enabled_rt(bool p_enable);
 	void _add_depth_map_callback_rt(const Callable &p_callback);
+	void _notify_environment_depth_start_failed();
 
 	bool _create_depth_provider_rt();
 	void _destroy_depth_provider_rt();

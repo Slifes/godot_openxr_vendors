@@ -5,14 +5,64 @@
 	</brief_description>
 	<description>
 		Populates Godot's depth buffer with reprojected data from the [code]XR_META_environment_depth[/code] extension, which will (by default) allow everything rendered by Godot to be occluded by real world objects.
+		The reprojection instance follows Godot's normal render-layer filtering. Select the desired inherited [member VisualInstance3D.layers], then include those layers only in the [member Camera3D.cull_mask] of cameras that should receive environment depth. Cameras whose cull mask does not overlap the node's layers cull the instance before drawing, so they do not execute the reprojection shader.
 		If you want certain objects to not be occluded, set the [code]render_priority[/code] on their materials to a value lower than [member render_priority] so they're rendered before this node fills the depth buffer. If that isn't flexible enough for your needs, you can write your own shaders that directly use the environment depth data.
+		The mask mesh filter can remove known static geometry from the environment depth. For example, a scanned floor mesh can be masked so an object below the floor remains visible while a hand in front of that floor still occludes it. Mask meshes are rendered to a GPU depth texture for each eye; the environment depth is discarded where a mask mesh is at the same depth or closer. On Vulkan, both inputs are combined at environment-depth resolution when they change, so the fullscreen reprojection pass needs only one filtered-depth texture sample per display pixel.
 		[b]NOTE:[/b] All transparent objects are always rendered after all opaque objects, so there is no [code]render_priority[/code] value that can cause a transparent object to be rendered before this node.
 	</description>
 	<tutorials>
 	</tutorials>
+	<methods>
+		<method name="add_mask_mesh">
+			<return type="void" />
+			<param index="0" name="mesh" type="MeshInstance3D" />
+			<description>
+				Adds [param mesh] to the mask mesh filter. The mesh resource and global transform are checked every frame and changes are copied to an internal GPU-only render pass. Its original materials and visibility do not affect the mask.
+				Adding the same instance more than once has no effect. The current implementation is intended for static or rigid [MeshInstance3D] nodes; skeleton and blend-shape deformation is not copied.
+			</description>
+		</method>
+		<method name="clear_mask_meshes">
+			<return type="void" />
+			<description>
+				Removes all meshes from the mask mesh filter and releases its auxiliary render targets.
+			</description>
+		</method>
+		<method name="get_mask_meshes" qualifiers="const">
+			<return type="Array" />
+			<description>
+				Returns the valid [MeshInstance3D] nodes currently used by the mask mesh filter.
+			</description>
+		</method>
+		<method name="get_mask_depth_texture" qualifiers="const">
+			<return type="RID" />
+			<param index="0" name="view_index" type="int" />
+			<description>
+				Returns the internal stereo mask-depth atlas RID. The [param view_index] is validated for compatibility, but both eyes share the returned texture: the left eye occupies the left half and the right eye occupies the right half. Returns an invalid RID while the mask filter resources are unavailable. Depth is encoded in RGB and empty pixels encode the far plane.
+			</description>
+		</method>
+		<method name="remove_mask_mesh">
+			<return type="void" />
+			<param index="0" name="mesh" type="MeshInstance3D" />
+			<description>
+				Removes [param mesh] from the mask mesh filter.
+			</description>
+		</method>
+	</methods>
 	<members>
 		<member name="bilinear_filtering" type="bool" setter="set_bilinear_filtering" getter="get_bilinear_filtering" default="true">
-			Enables bilinear filtering. This will have a higher GPU cost, but lead to somewhat straighter (rather than jagged) edges in the reprojected data.
+			Enables four-sample coverage-aware bilinear filtering. This reduces stair-stepped edges without alpha blending and avoids interpolating invalid texels or unrelated surfaces across a depth discontinuity.
+		</member>
+		<member name="mask_filter_bias" type="float" setter="set_mask_filter_bias" getter="get_mask_filter_bias" default="0.01">
+			Distance, in meters along the depth camera view, that the mask is moved toward the camera before comparison. Increase this value if imperfect room meshes leave small patches of environment depth. Large values can also remove hands or other real geometry close to the masked surface.
+		</member>
+		<member name="mask_filter_enabled" type="bool" setter="set_mask_filter_enabled" getter="get_mask_filter_enabled" default="false">
+			Enables the mask mesh filter. At least one mesh must have been registered with [method add_mask_mesh]. This allocates one auxiliary viewport containing a side-by-side stereo depth atlas.
+		</member>
+		<member name="mask_filter_resolution_scale" type="float" setter="set_mask_filter_resolution_scale" getter="get_mask_filter_resolution_scale" default="1.0">
+			Resolution scale of each eye in the stereo mask atlas relative to the Meta environment depth texture. Lower values reduce GPU cost at the expense of mask edge precision. A value of [code]0.5[/code] renders one quarter as many mask pixels per eye.
+		</member>
+		<member name="mask_filter_update_rate" type="float" setter="set_mask_filter_update_rate" getter="get_mask_filter_update_rate" default="30.0">
+			Maximum mask atlas update rate in Hz. The atlas is also refreshed immediately when a registered mesh, its transform, or the atlas size changes.
 		</member>
 		<member name="render_priority" type="int" setter="set_render_priority" getter="get_render_priority" default="-50">
 			Determines the order this node will be rendered relative to other objects in the scene. Lower values will be rendered earlier.

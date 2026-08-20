@@ -63,6 +63,8 @@ The easiest way to enable occlusion is by adding an :ref:`OpenXRMetaEnvironmentD
 
 This node takes the depth map from Meta Environment Depth and reprojects it into the depth buffer used by Godot's renderer, so that any virtual pixels that are behind real-world objects will automatically be discard.
 
+The reprojection instance follows Godot's normal render-layer filtering. Set the inherited ``VisualInstance3D > Layers`` property on the ``OpenXRMetaEnvironmentDepth`` node, then include those layers only in the ``cull_mask`` of cameras that should receive environment depth. Cameras whose ``cull_mask`` does not overlap the node's layers cull the instance before drawing, so they do not execute the reprojection shader.
+
 However, due to the relatively low resolution of the depth map, its decreasing accuracy further away from the player, and the precision getting slightly worse from doing reprojection, the depth map may not exactly line up with the data from the Meta Scene Manager. This is especially noticeable if you are using the Meta Scene Manager to draw virtual walls, floors or ceilings - you can sometimes see parts of a virtual wall, for example, getting occluded by the real world wall.
 
 To work around this issue, you can adjust the :ref:`reprojection_offset_exponent <class_openxrmetaenvironmentdepth_property_reprojection_offset_exponent>` and :ref:`reprojection_offset_scale <class_openxrmetaenvironmentdepth_property_reprojection_offset_scale>` properties, which will offset the depth information to be somewhat closer the player. How much closer is a function of the distance from the camera.
@@ -78,6 +80,35 @@ If you want certain objects to not be occluded, set the ``render_priority`` on t
 .. note::
 
 	All transparent objects are always rendered after all opaque objects, so there is no ``render_priority`` value that can cause a transparent object to be rendered before this node.
+
+Masking known environment meshes
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The :ref:`OpenXRMetaEnvironmentDepth <class_openxrmetaenvironmentdepth>` node can filter known static geometry out of the environment depth map. This is useful for effects such as a portal or hole in a scanned floor: the floor can be removed from occlusion while hands, people, and objects in front of it remain occluders.
+
+Register one or more ``MeshInstance3D`` nodes and enable the filter:
+
+.. code:: gdscript
+
+	@export var environment_depth: OpenXRMetaEnvironmentDepth
+	@export var floor_mesh: MeshInstance3D
+
+	func _ready() -> void:
+		# Keep hand removal disabled when hands should remain as occluders.
+		OpenXRMetaEnvironmentDepthExtension.set_hand_removal_enabled(false)
+
+		environment_depth.add_mask_mesh(floor_mesh)
+		environment_depth.mask_filter_bias = 0.01
+		environment_depth.mask_filter_resolution_scale = 0.5
+		environment_depth.mask_filter_enabled = true
+
+The registered mesh is rendered to a side-by-side stereo depth atlas using the Meta depth sensor projection. Both eyes are processed by one auxiliary viewport. The bias moves the rendered mask toward the depth camera by ``mask_filter_bias`` meters before the mask is compared with the measured environment surface. Matching environment-depth pixels are not written to Godot's depth buffer. Real geometry meaningfully closer than the mask remains in the depth map.
+
+The filter runs entirely on the GPU and does not modify ``META_ENVIRONMENT_DEPTH_TEXTURE``. Custom shaders sampling that global texture still receive the original map. On Vulkan, the Meta depth and stereo mask atlas are combined once at environment-depth resolution whenever either input changes. The fullscreen reprojection pass then samples only that compact filtered texture instead of sampling both inputs for every display pixel. OpenGL uses a per-fragment compatibility fallback.
+
+The current implementation checks the mesh resource and global transform every frame, but only sends changes to the rendering server. It does not copy skeleton or blend-shape deformation, so it is intended primarily for room meshes, floors, walls, furniture, and other static or rigid geometry.
+
+Masking large or overlapping meshes increases GPU cost because every registered mesh is rendered once per eye inside the atlas. Use the smallest mesh set that describes the surfaces you want to remove. Lowering ``mask_filter_resolution_scale`` reduces the number of mask pixels; ``0.5`` is a useful starting point on standalone headsets. A large bias can incorrectly remove hands or objects that are very close to a masked surface.
 
 If that isn't flexible enough for your needs, you can write your own shaders that directly use the environment depth data.
 
@@ -140,7 +171,8 @@ For example, if you **don't** use an ``OpenXRMetaEnvironmentDepth`` node, you ca
 	}
 
 	float get_bilinear_environment_depth(vec2 uv, uint view_index) {
-		vec2 p = uv / META_ENVIRONMENT_DEPTH_TEXEL_SIZE;
+		// Convert UV to texel-center coordinates before selecting the 2x2 footprint.
+		vec2 p = uv / META_ENVIRONMENT_DEPTH_TEXEL_SIZE - vec2(0.5);
 		vec2 f = fract(p);
 		vec2 i = floor(p);
 
